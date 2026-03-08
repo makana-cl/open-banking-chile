@@ -1,0 +1,43 @@
+{
+  "name": "banco-falabella-scraper",
+  "version": "1.0.0",
+  "description": "Scraper no oficial para obtener movimientos y saldo de Banco Falabella Chile. Unofficial scraper for Banco Falabella (Chile) — get your bank movements and balance as clean JSON.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "banco-falabella": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "banco-falabella",
+    "bank-scraper",
+    "chile",
+    "finanzas",
+    "banking",
+    "scraper",
+    "puppeteer",
+    "cartola",
+    "movimientos"
+  ],
+  "author": "Kai Horwitz <kai@makana.cl>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kaihv/banco-falabella-scraper"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}
