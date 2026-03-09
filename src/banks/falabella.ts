@@ -310,6 +310,68 @@ async function extractMovements(page: Page): Promise<BankMovement[]> {
   });
 }
 
+// ─── Pagination ────────────────────────────────────────────────
+
+async function paginateAndExtract(page: Page, debugLog: string[]): Promise<BankMovement[]> {
+  const allMovements: BankMovement[] = [];
+
+  for (let i = 0; i < 20; i++) {
+    const movements = await extractMovements(page);
+    allMovements.push(...movements);
+
+    const isDisabled = await page.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"));
+      for (const btn of candidates) {
+        const text = (btn as HTMLElement).innerText?.trim().toLowerCase();
+        if (text === "siguiente" || text === "›" || text === ">") {
+          return (btn as HTMLButtonElement).disabled || (btn as HTMLElement).classList.contains("disabled") || (btn as HTMLElement).getAttribute("aria-disabled") === "true";
+        }
+      }
+      return true; // no "Siguiente" button = last page
+    });
+
+    if (isDisabled) break;
+
+    await page.evaluate(() => {
+      const candidates = Array.from(document.querySelectorAll("button, a, [role='button']"));
+      for (const btn of candidates) {
+        const text = (btn as HTMLElement).innerText?.trim().toLowerCase();
+        if (text === "siguiente" || text === "›" || text === ">") {
+          (btn as HTMLElement).click();
+          return;
+        }
+      }
+    });
+    await delay(3000);
+  }
+
+  return allMovements;
+}
+
+// ─── Logout ─────────────────────────────────────────────────────
+
+async function logout(page: Page, debugLog: string[]): Promise<void> {
+  try {
+    const clicked = await page.evaluate(() => {
+      const elements = Array.from(document.querySelectorAll("a, button, span, div, li"));
+      for (const el of elements) {
+        const text = (el as HTMLElement).innerText?.trim().toLowerCase();
+        if (text === "cerrar sesión" || text === "salir" || text === "logout" || text === "sign out") {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+      return false;
+    });
+    if (clicked) {
+      debugLog.push("  Logged out successfully");
+      await delay(2000);
+    }
+  } catch {
+    // best effort — browser.close() ends the session anyway
+  }
+}
+
 // ─── Main scraper ──────────────────────────────────────────────
 
 async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
@@ -336,12 +398,15 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
     browser = await puppeteer.launch({
       executablePath,
       headless: !headful,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--window-size=1280,900", "--disable-blink-features=AutomationControlled"],
     });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+    });
 
     // Step 1: Navigate
     debugLog.push("1. Navigating to bank homepage...");
@@ -474,8 +539,8 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
     // Step 8: Expand date range
     await tryExpandDateRange(page, debugLog);
 
-    // Step 9: Extract movements
-    const movements = await extractMovements(page);
+    // Step 9: Extract movements (with pagination)
+    const movements = await paginateAndExtract(page, debugLog);
     debugLog.push(`9. Extracted ${movements.length} movements`);
 
     // Step 10: Get balance
@@ -498,7 +563,13 @@ async function scrape(options: ScraperOptions): Promise<ScrapeResult> {
   } catch (error) {
     return { success: false, bank, movements: [], error: `Error del scraper: ${error instanceof Error ? error.message : String(error)}`, debug: debugLog.join("\n") };
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      try {
+        const pages = await browser.pages();
+        if (pages.length > 0) await logout(pages[pages.length - 1], debugLog);
+      } catch { /* best effort */ }
+      await browser.close().catch(() => {});
+    }
   }
 }
 
