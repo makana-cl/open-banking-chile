@@ -52,8 +52,23 @@ export interface CreditCardBalance {
   };
   /** Periodo de facturación actual (ej: "Febrero 2026") */
   billingPeriod?: string;
-  /** Próxima fecha de facturación (ej: "19 de marzo") */
+  /** Próxima fecha de facturación (formato dd-mm-yyyy) */
   nextBillingDate?: string;
+  /** Próxima fecha de vencimiento de pago (formato dd-mm-yyyy) */
+  nextDueDate?: string;
+  /** Gastos del período actual (no facturados) */
+  periodExpenses?: number;
+  /** Datos del último estado de cuenta facturado */
+  lastStatement?: {
+    /** Fecha de facturación dd-mm-yyyy */
+    billingDate: string;
+    /** Monto total facturado */
+    billedAmount: number;
+    /** Fecha de vencimiento dd-mm-yyyy */
+    dueDate: string;
+    /** Pago mínimo */
+    minimumPayment?: number;
+  };
 }
 
 /** Resultado del scraping */

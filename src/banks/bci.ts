@@ -185,20 +185,6 @@ async function extractMovementsFromFrame(frame: Frame, debugLog: string[]): Prom
 }
 
 // ─── extractTCMovements — versión corregida ──────────────────────────────────
-//
-// Correcciones vs versión original:
-//  A. Signo del monto → lee el atributo alt del <img> ("Cargo" / "Abono")
-//  B. Paginador       → frame.click("#btn-next") en lugar de btn.click()
-//                       dentro de evaluate(). Angular no reacciona al .click()
-//                       nativo de JS; frame.click() simula un evento real del mouse.
-//  C. Navegación      → espera cambio de tabla con huella primera+última fila
-//                       antes de leer la siguiente página (anti-doble-lectura).
-//  D. Extracción de filas → estructura real confirmada desde el HTML:
-//       td[0] fecha | td[1] descripción+cont-circle | td[2] tipo tarjeta
-//       td[3] div.container_monto > p + img          | td[4] flecha detalle
-//     El código original usaba cells[cells.length-1] → agarraba td[4] (flecha >).
-//     La descripción se limpia extrayendo solo p.customRow del td[1].
-
 async function extractTCMovements(
   frame: Frame,
   tab: string,
