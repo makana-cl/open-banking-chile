@@ -80,6 +80,7 @@ function parseExcelMovements(filePath: string, source: MovementSource, debugLog:
 
       // VALOR CUOTA is the installment amount billed this period (negative for payments).
       const amount = -valorCuota;
+      const totalAmount = Math.abs(monto);
       movements.push({
         date,
         description,
@@ -88,6 +89,7 @@ function parseExcelMovements(filePath: string, source: MovementSource, debugLog:
         source,
         owner: normalizeOwner(ownerRaw),
         installments: deriveInstallments(cuotasPendientes, Math.abs(monto), Math.abs(valorCuota)),
+        totalAmount,
       });
     }
     return movements;
@@ -453,7 +455,10 @@ async function extractCmrMovementsFromTable(page: Page): Promise<BankMovement[]>
           if (!dateMatch && !pendingImg && texts[0] !== "") continue;
           const date = dateMatch ? dateMatch[1].replace(/\//g, "-") : "pendiente";
           const description = texts[1] || "";
-          const montoText = texts[3] || "";
+          // texts[3]=Monto total, texts[5]=Cuota a pagar — prefer Cuota a pagar (installment amount)
+          const totalText = texts[3] || "";
+          const cuotaText = texts[5] || "";
+          const montoText = cuotaText || totalText;
           const isNeg = montoText.includes("-$");
           const amountMatch = montoText.match(/\$\s*([\d.,]+)/);
           let amount = 0;
@@ -461,8 +466,12 @@ async function extractCmrMovementsFromTable(page: Page): Promise<BankMovement[]>
             const value = parseInt(amountMatch[1].replace(/\./g, "").replace(",", "."), 10) || 0;
             amount = isNeg ? value : -value;
           }
+          const totalAmountMatch = totalText.match(/\$\s*([\d.,]+)/);
+          const totalAmount = totalAmountMatch
+            ? parseInt(totalAmountMatch[1].replace(/\./g, "").replace(",", "."), 10) || undefined
+            : undefined;
           if (description && amount !== 0)
-            movements.push({ date, description, amount, balance: 0, source: "credit_card_unbilled" as MovementSource, owner: (texts[2] || undefined) as CardOwner | undefined, installments: texts[4] || undefined });
+            movements.push({ date, description, amount, balance: 0, source: "credit_card_unbilled" as MovementSource, owner: (texts[2] || undefined) as CardOwner | undefined, installments: texts[4] || undefined, totalAmount });
         }
       }
     }
@@ -642,8 +651,9 @@ async function paginateInvoicedMovements(page: Page, debugLog: string[]): Promis
           if (!dateMatch && texts[0] !== "") continue; // skip separator rows
           const date = dateMatch ? dateMatch[1].replace(/\//g, "-") : "pendiente";
           const description = texts[1] || "";
-          // "Cuota a pagar" (col 5) takes precedence over "Monto total" (col 3)
-          const montoText = (texts[5] && texts[5] !== texts[4]) ? texts[5] : texts[3] || "";
+          // "Cuota a pagar" (col 5) takes precedence over "Monto total" (col 3) as amount
+          const totalText = texts[3] || "";
+          const montoText = (texts[5] && texts[5] !== texts[4]) ? texts[5] : totalText;
           const isNeg = montoText.includes("-$");
           const amountMatch = montoText.match(/\$\s*([\d.,]+)/);
           let amount = 0;
@@ -651,12 +661,17 @@ async function paginateInvoicedMovements(page: Page, debugLog: string[]): Promis
             const value = parseInt(amountMatch[1].replace(/\./g, "").replace(",", "."), 10) || 0;
             amount = isNeg ? value : -value;
           }
+          const totalAmountMatch = totalText.match(/\$\s*([\d.,]+)/);
+          const totalAmount = totalAmountMatch
+            ? parseInt(totalAmountMatch[1].replace(/\./g, "").replace(",", "."), 10) || undefined
+            : undefined;
           if (description && amount !== 0) {
             rows.push({
               date, description, amount, balance: 0,
               source: "credit_card_billed" as MovementSource,
               owner: (texts[2] || undefined) as CardOwner | undefined,
               installments: texts[4] || undefined,
+              totalAmount,
             });
           }
         }
@@ -1019,18 +1034,17 @@ async function scrapeFalabella(session: BrowserSession, options: ScraperOptions)
       debugLog.push(`  Gastos del período: $${unbilledInfo.periodExpenses}`);
     }
 
-    // Try Excel download for no facturados; fallback to DOM
-    let unbilledMovements: BankMovement[] = [];
-    const excelPathUnbilled = await downloadCmrExcel(page, downloadDir, debugLog);
-    if (excelPathUnbilled) {
-      unbilledMovements = parseExcelMovements(excelPathUnbilled, MOVEMENT_SOURCE.credit_card_unbilled, debugLog);
-      debugLog.push(`  TC por facturar (Excel): ${unbilledMovements.length}`);
-      // Remove the first xlsx so it doesn't occupy the same filename slot when the
-      // facturados export runs — both exports may share the same filename.
-      try { fs.unlinkSync(excelPathUnbilled); } catch { /* best-effort */ }
-    } else {
-      unbilledMovements = await paginateCmrMovements(page, debugLog);
-      debugLog.push(`  TC por facturar (DOM): ${unbilledMovements.length}`);
+    // DOM pagination first (preserves real installment counters); Excel as fallback
+    let unbilledMovements: BankMovement[] = await paginateCmrMovements(page, debugLog);
+    debugLog.push(`  TC por facturar (DOM): ${unbilledMovements.length}`);
+    if (unbilledMovements.length === 0) {
+      const excelPathUnbilled = await downloadCmrExcel(page, downloadDir, debugLog);
+      if (excelPathUnbilled) {
+        unbilledMovements = parseExcelMovements(excelPathUnbilled, MOVEMENT_SOURCE.credit_card_unbilled, debugLog);
+        debugLog.push(`  TC por facturar (Excel fallback): ${unbilledMovements.length}`);
+        // Remove so it doesn't collide with the facturados export filename.
+        try { fs.unlinkSync(excelPathUnbilled); } catch { /* best-effort */ }
+      }
     }
 
     await doSave(page, "07-cmr-no-facturados");
@@ -1067,13 +1081,15 @@ async function scrapeFalabella(session: BrowserSession, options: ScraperOptions)
         debugLog.push(`  lastStatement: facturado=${billingDate}, monto=$${billedInfo.billedAmount}, vence=${creditCardData.lastStatement.dueDate}, minimo=$${billedInfo.minimumPayment}`);
       }
 
-      const excelPathBilled = await downloadCmrExcel(page, downloadDir, debugLog);
-      if (excelPathBilled) {
-        billedMovements = parseExcelMovements(excelPathBilled, MOVEMENT_SOURCE.credit_card_billed, debugLog);
-        debugLog.push(`  TC facturados (Excel): ${billedMovements.length}`);
-      } else {
-        billedMovements = await paginateInvoicedMovements(page, debugLog);
-        debugLog.push(`  TC facturados (inv): ${billedMovements.length}`);
+      // DOM pagination first (preserves real installment counters); Excel as fallback
+      billedMovements = await paginateInvoicedMovements(page, debugLog);
+      debugLog.push(`  TC facturados (DOM): ${billedMovements.length}`);
+      if (billedMovements.length === 0) {
+        const excelPathBilled = await downloadCmrExcel(page, downloadDir, debugLog);
+        if (excelPathBilled) {
+          billedMovements = parseExcelMovements(excelPathBilled, MOVEMENT_SOURCE.credit_card_billed, debugLog);
+          debugLog.push(`  TC facturados (Excel fallback): ${billedMovements.length}`);
+        }
       }
     }
 

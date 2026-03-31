@@ -31,6 +31,8 @@ export interface BankMovement {
   owner?: CardOwner;
   /** Cuotas (ej: "01/01", "02/06") */
   installments?: string;
+  /** Monto total de la compra (distinto de amount cuando es en cuotas) */
+  totalAmount?: number;
 }
 
 /** Saldo de una tarjeta de crédito */
