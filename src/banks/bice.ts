@@ -346,8 +346,9 @@ async function extractCreditCardInfo(page: Page, debugLog: string[]): Promise<{ 
       internationalUsed?: number;
       internationalAvailable?: number;
       internationalTotal?: number;
-      billingPeriod?: string;
-      nextBillingDate?: string;
+      billingDate?: string;
+      dueDate?: string;
+      billedAmount?: string;
     } = {};
 
     // Card label — use specific selectors: p.subheading.semibold + p.format-number
@@ -400,11 +401,30 @@ async function extractCreditCardInfo(page: Page, debugLog: string[]): Promise<{ 
     }
 
     // Billing dates — from card-billing-info-container
-    const allText = document.body.innerText || "";
-    const billingMatch = allText.match(/Facturación:\s*(\d{1,2}\s+\w+\s+\d{4})/i);
-    const dueMatch = allText.match(/Vencimiento:\s*(\d{1,2}\s+\w+\s+\d{4})/i);
-    if (billingMatch) result.billingPeriod = billingMatch[1];
-    if (dueMatch) result.nextBillingDate = dueMatch[1];
+    // There can be two containers: one for Nacional (CLP), one for Internacional (US$)
+    const billingContainers = document.querySelectorAll(".card-billing-info-container");
+    for (const container of billingContainers) {
+      const containerText = (container as HTMLElement).innerText || "";
+      // Only use the CLP (national) billing info for the main card
+      if (containerText.includes("CLP") || !containerText.includes("US$")) {
+        const billingMatch = containerText.match(/Facturación:\s*(\d{1,2}\s+\w+\s+\d{4})/i);
+        const dueMatch = containerText.match(/Vencimiento:\s*(\d{1,2}\s+\w+\s+\d{4})/i);
+        const billedAmountMatch = containerText.match(/Monto facturado\s*([\d.,]+)\s*CLP/i);
+        if (billingMatch) result.billingDate = billingMatch[1];
+        if (dueMatch) result.dueDate = dueMatch[1];
+        if (billedAmountMatch) result.billedAmount = billedAmountMatch[1];
+        break;
+      }
+    }
+
+    // Fallback: search full page text
+    if (!result.billingDate) {
+      const allText = document.body.innerText || "";
+      const billingMatch = allText.match(/Facturación:\s*(\d{1,2}\s+\w+\s+\d{4})/i);
+      const dueMatch = allText.match(/Vencimiento:\s*(\d{1,2}\s+\w+\s+\d{4})/i);
+      if (billingMatch) result.billingDate = billingMatch[1];
+      if (dueMatch) result.dueDate = dueMatch[1];
+    }
 
     return result;
   });
@@ -430,8 +450,18 @@ async function extractCreditCardInfo(page: Page, debugLog: string[]): Promise<{ 
     };
   }
 
-  if (data.billingPeriod) ccBalance.billingPeriod = data.billingPeriod;
-  if (data.nextBillingDate) ccBalance.nextBillingDate = data.nextBillingDate;
+  if (data.billingDate) ccBalance.nextBillingDate = data.billingDate;
+  if (data.dueDate) ccBalance.nextDueDate = data.dueDate;
+  if (data.billedAmount) {
+    const billedVal = parseInt(data.billedAmount.replace(/\./g, "").replace(",", "."), 10);
+    if (!isNaN(billedVal) && data.billingDate) {
+      ccBalance.lastStatement = {
+        billingDate: data.billingDate,
+        billedAmount: billedVal,
+        dueDate: data.dueDate || "",
+      };
+    }
+  }
 
   debugLog.push(`TC: Card=${ccBalance.label}, Nacional used=${ccBalance.national?.used}, Intl used=${ccBalance.international?.used}`);
 
@@ -440,9 +470,10 @@ async function extractCreditCardInfo(page: Page, debugLog: string[]): Promise<{ 
 
 async function extractTcMovementsFromPage(page: Page, source: MovementSource): Promise<BankMovement[]> {
   const raw = await page.evaluate(() => {
-    const results: Array<{ date: string; description: string; amount: string; installments: string }> = [];
+    const results: Array<{ date: string; category: string; description: string; amount: string; installments: string; currency: string }> = [];
 
     // Use app-transaction-row elements (BICE's actual DOM structure)
+    // Each row has: date / category / subcategory / description / installments / amount
     const rows = document.querySelectorAll("app-transaction-row");
 
     for (const row of rows) {
@@ -451,20 +482,27 @@ async function extractTcMovementsFromPage(page: Page, source: MovementSource): P
       const date = dateEl?.textContent?.trim() || "";
       if (!/^\d{1,2}\s/.test(date)) continue;
 
-      // Description: div.transaction-detail
+      // Description: div.transaction-detail (may contain category + subcategory + description)
       const descEl = row.querySelector("div.transaction-detail, div.transaction-detail.transaction-state");
-      const description = descEl?.textContent?.trim() || "";
+      const descText = descEl?.textContent?.trim() || "";
+      // The full text is "Category\nSubcategory\nDescription" — extract just the description (last meaningful line)
+      const descLines = descText.split("\n").map(l => l.trim()).filter(Boolean);
+      const description = descLines.length >= 3 ? descLines[descLines.length - 1] : descText;
+      const category = descLines.length >= 2 ? descLines[0] : "";
 
       // Installments: div.transaction-installments
       const instEl = row.querySelector("div.transaction-installments");
       const installments = instEl?.textContent?.trim() || "";
 
-      // Amount: span.transaction-amount
+      // Amount: span.transaction-amount — format is "5.720 CLP" or "48,43 US$"
       const amtEl = row.querySelector("span.transaction-amount");
-      const amount = amtEl?.textContent?.trim() || "";
+      const amountFull = amtEl?.textContent?.trim() || "";
+      const currency = amountFull.includes("US$") ? "USD" : "CLP";
+      // Strip currency suffix for parsing
+      const amount = amountFull.replace(/\s*(CLP|US\$)\s*/gi, "").trim();
 
-      if (date && description && amount) {
-        results.push({ date, description, amount, installments });
+      if (date && description && amountFull) {
+        results.push({ date, category, description, amount, installments, currency });
       }
     }
 
@@ -473,12 +511,24 @@ async function extractTcMovementsFromPage(page: Page, source: MovementSource): P
 
   return raw
     .map((r) => {
-      const amountVal = parseChileanAmount(r.amount);
+      // Parse amount: CLP uses dots as thousands sep (5.720), USD uses comma as decimal (48,43)
+      let amountVal: number;
+      if (r.currency === "USD") {
+        amountVal = Math.round(parseFloat(r.amount.replace(/\./g, "").replace(",", ".")) * 1000) || 0;
+        // Store as integer (millicents) — or just parse as CLP equivalent
+        // For consistency with other scrapers, parse as integer
+        amountVal = parseChileanAmount(r.amount);
+      } else {
+        amountVal = parseChileanAmount(r.amount);
+      }
       if (amountVal === 0) return null;
+
       // TC movements are always expenses (negative)
       // Exception: abonos/payments which are credits
+      const catLower = r.category.toLowerCase();
       const descLower = r.description.toLowerCase();
       const isCredit =
+        catLower.includes("abono") ||
         descLower.includes("abono") ||
         /\bpago\b/.test(descLower) ||
         descLower.includes("nota de credito") ||
@@ -559,26 +609,51 @@ async function scrapeBice(session: BrowserSession, options: ScraperOptions): Pro
   await dismissAdPopup(activePage, debugLog);
   await closePopups(activePage);
 
-  // Balance
+  // Balance — try h2.cabeceraCard2 first, then fallback to any H2 with $ amount on dashboard
   const balance = await activePage.evaluate(() => {
     const el = document.querySelector("h2.cabeceraCard2");
-    if (!el) return undefined;
-    const text = (el as HTMLElement).innerText?.trim();
-    if (!text) return undefined;
-    const val = parseInt(text.replace(/[^0-9]/g, ""), 10);
-    return isNaN(val) ? undefined : val;
+    if (el) {
+      const text = (el as HTMLElement).innerText?.trim();
+      if (text) {
+        const val = parseInt(text.replace(/[^0-9]/g, ""), 10);
+        if (!isNaN(val)) return val;
+      }
+    }
+    // Fallback: first H2 with a $ amount (dashboard shows balance as H2)
+    const h2s = document.querySelectorAll("h2");
+    for (const h2 of h2s) {
+      const text = (h2 as HTMLElement).innerText?.trim() || "";
+      const match = text.match(/^\$\s*([\d.]+)/);
+      if (match) {
+        const val = parseInt(match[1].replace(/\./g, ""), 10);
+        if (!isNaN(val)) return val;
+      }
+    }
+    return undefined;
   });
   debugLog.push(`  Balance: ${balance !== undefined ? `$${balance.toLocaleString("es-CL")}` : "not found"}`);
 
-  // Navigate to movements
+  // Navigate to movements — try link first, fallback to direct URL
   progress("Navegando a movimientos...");
   debugLog.push("9. Navigating to movements...");
   const link = await activePage.$("a.ultimosMov");
-  if (!link) {
-    const ss = await activePage.screenshot({ encoding: "base64" });
-    return { success: false, bank, accounts: [], error: "No se pudo navegar a movimientos", screenshot: ss as string, debug: debugLog.join("\n") };
+  if (link) {
+    await link.click();
+  } else {
+    // Fallback: try "Ir a Saldos y movimientos" link text
+    const textLink = await activePage.evaluate(() => {
+      const links = document.querySelectorAll("a");
+      for (const a of links) {
+        if ((a as HTMLElement).innerText?.includes("Saldos y movimientos")) { (a as HTMLElement).click(); return true; }
+      }
+      return false;
+    });
+    if (!textLink) {
+      // Last resort: direct URL navigation
+      debugLog.push("  Falling back to direct URL navigation...");
+      await activePage.goto("https://portalpersonas.bice.cl/movimientos-cc", { waitUntil: "networkidle2", timeout: 20000 });
+    }
   }
-  await link.click();
   try { await activePage.waitForSelector("div.transaction-table__container", { timeout: 15000 }); } catch { /* timeout */ }
   await delay(2000);
   await doSave(activePage, "05-movements-page");
@@ -603,7 +678,14 @@ async function scrapeBice(session: BrowserSession, options: ScraperOptions): Pro
     });
 
     if (clicked) {
-      try { await activePage.waitForSelector('ds-dropdown[toplabel="Elige un periodo"]', { timeout: 10000 }); } catch { /* timeout */ }
+      try { await activePage.waitForSelector('ds-dropdown[toplabel="Elige un periodo"]', { timeout: 10000 }); } catch {
+        // Fallback: navigate directly to historical page
+        debugLog.push("  Period dropdown not found, trying direct URL...");
+        try {
+          await activePage.goto("https://portalpersonas.bice.cl/historial-cartolas/mn", { waitUntil: "networkidle2", timeout: 20000 });
+          await delay(3000);
+        } catch { /* ignore */ }
+      }
       await delay(2000);
 
       const firstMovements = await bicePaginate(activePage, (p) => extractHistoricalMovements(p, debugLog));
@@ -686,6 +768,19 @@ async function scrapeBice(session: BrowserSession, options: ScraperOptions): Pro
 
   await doSave(activePage, "07-final");
   const ss = doScreenshots ? (await activePage.screenshot({ encoding: "base64", fullPage: true })) as string : undefined;
+
+  // Logout — click "Salir" link (a.cerrar.close)
+  try {
+    const logoutClicked = await activePage.evaluate(() => {
+      const link = document.querySelector("a.cerrar.close");
+      if (link) { (link as HTMLElement).click(); return true; }
+      return false;
+    });
+    if (logoutClicked) {
+      debugLog.push("  Logout OK");
+      await delay(2000);
+    }
+  } catch { /* best effort */ }
 
   return { success: true, bank, accounts: [{ balance: balance || undefined, movements: finalMovements }], creditCards: creditCards, screenshot: ss, debug: debugLog.join("\n") };
 }
