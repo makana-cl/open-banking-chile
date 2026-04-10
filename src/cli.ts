@@ -85,8 +85,8 @@ Ejemplos:
     process.exit(1);
   }
 
-  // Get credentials from env
-  const prefix = bankId.toUpperCase();
+  // Get credentials from env — normalize hyphens to underscores for env var compatibility
+  const prefix = bankId.toUpperCase().replace(/-/g, "_");
   const rut = process.env[`${prefix}_RUT`];
   const password = process.env[`${prefix}_PASS`];
 
