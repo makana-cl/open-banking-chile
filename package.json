@@ -1,6 +1,6 @@
 {
   "name": "@makanacl/open-banking-chile",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Scrapers open source para bancos chilenos. Obtén tus movimientos y saldo como JSON. Open source scrapers for Chilean banks.",
   "type": "module",
   "main": "dist/index.cjs",
