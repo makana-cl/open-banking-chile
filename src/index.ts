@@ -3,6 +3,7 @@ import bchile from "./banks/bchile.js";
 import bci from "./banks/bci.js";
 import bestado from "./banks/bestado.js";
 import bice from "./banks/bice.js";
+import consorcio from "./banks/consorcio.js";
 import edwards from "./banks/edwards.js";
 import falabella from "./banks/falabella.js";
 import itau from "./banks/itau.js";
@@ -17,6 +18,7 @@ export const banks: Record<string, BankScraper> = {
   bci,
   bestado,
   bice,
+  consorcio,
   edwards,
   falabella,
   itau,
@@ -62,4 +64,5 @@ export { default as falabella } from "./banks/falabella.js";
 export { default as itau } from "./banks/itau.js";
 export { default as santander } from "./banks/santander.js";
 export { default as bancosecurity } from "./banks/bancosecurity.js";
+export { default as consorcio } from "./banks/consorcio.js";
 export { default as scotiabank } from "./banks/scotiabank.js";
