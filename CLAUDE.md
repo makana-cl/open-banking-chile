@@ -1,18 +1,24 @@
-# Open Banking Chile
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What is this?
-Open source scrapers for Chilean banks. Clean architecture with three layers: infrastructure (browser lifecycle), actions (reusable scraping operations), and banks (bank-specific orchestration). 9 banks supported.
+
+Open source scrapers for Chilean banks. Clean architecture with three layers: infrastructure (browser lifecycle), actions (reusable scraping operations), and banks (bank-specific orchestration). 10 banks supported.
 
 ## Project structure
+
 ```
 src/
   index.ts                 — Registry of all banks, getBank(), listBanks()
   types.ts                 — BankScraper interface, BankMovement, ScrapeResult, ScraperOptions
   utils.ts                 — Shared utilities (formatRut, findChrome, parseChileanAmount, normalizeDate, etc.)
   cli.ts                   — CLI entry point (--bank, --list, --pretty, --movements)
+  intercept.ts             — Network interceptor: capture API responses by URL prefix during scraping
   infrastructure/
     browser.ts             — Centralized browser launch, session management, anti-detection
     scraper-runner.ts      — Execution pipeline: validate → launch → scrape → logout → cleanup
+    downloader.ts          — File download helpers (temp dirs, CDP download config, wait-for-file)
   actions/
     login.ts               — Generic login (RUT formats, password, submit, error detection)
     navigation.ts          — DOM navigation (click by text, sidebars, banner dismissal)
@@ -22,9 +28,31 @@ src/
     balance.ts             — Balance extraction (regex + CSS selector fallbacks)
     two-factor.ts          — 2FA detection and wait (configurable keywords/timeout)
   banks/
-    falabella.ts, bchile.ts, bci.ts, bestado.ts, bice.ts,
-    edwards.ts, itau.ts, santander.ts, scotiabank.ts
+    bancosecurity.ts, bchile.ts, bci.ts, bestado.ts, bice.ts,
+    edwards.ts, falabella.ts, itau.ts, santander.ts, scotiabank.ts
+test/
+  *.mjs                   — Integration tests per bank (bchile, bci, bestado, falabella, itau)
 ```
+
+## Build, test, lint
+
+```bash
+npm run build              # tsup → dist/ (ESM + CJS + .d.ts)
+npm run dev                # tsup --watch
+npm test                   # vitest run (unit tests)
+npm run test:watch         # vitest in watch mode
+npx vitest run src/utils.test.ts   # Single test file
+npx tsc --noEmit           # Type check without emitting
+```
+
+Build uses **tsup** (see `tsup.config.ts`). Two entry points: `src/index.ts` (library) and `src/cli.ts` (CLI binary).
+
+## Dependencies
+
+- **puppeteer-core** — primary browser automation (Chromium)
+- **playwright-core** — used by some bank scrapers as alternative driver
+- **xlsx** — parsing Excel/XLS downloads (e.g. BancoEstado cartola)
+- **dotenv** — loads `.env` for credentials
 
 ## How to help the user
 
