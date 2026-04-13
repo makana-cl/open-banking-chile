@@ -5,6 +5,7 @@ import { closePopups, delay, parseChileanAmount, normalizeDate, deduplicateMovem
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { clickByText } from "../actions/navigation.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── Bestado-specific constants ──────────────────────────────────
 
@@ -283,6 +284,10 @@ async function scrapeBestado(
   const postLoginUrl = new URL(page.url());
   debugLog.push(`  Login OK! URL: ${postLoginUrl.origin}${postLoginUrl.pathname}`);
   progress("Sesión iniciada correctamente");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options);
+  if (validateResult) return validateResult;
 
   // 6. Balance
   debugLog.push("6. Extracting CuentaRUT balance...");

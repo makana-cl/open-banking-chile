@@ -4,6 +4,7 @@ import { chromium, type Browser, type Page } from "playwright-core";
 import type { BankMovement, BankScraper, CreditCardBalance, ScrapeResult, ScraperOptions, MovementSource } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
 import { DebugLog, delay, deduplicateMovements, findChrome, normalizeDate, normalizeInstallments } from "../utils.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -585,6 +586,10 @@ async function scrapeBchile(options: ScraperOptions): Promise<ScrapeResult> {
     }
 
     const dashboardUrl = loginResult.dashboardUrl;
+
+    // Validate-only mode: return early after successful login
+    const validateResult = await handleValidateOnly(page, bank, options);
+    if (validateResult) return validateResult;
 
     // Phase 1: Account movements
     const { movements: accountMovements, balance } = await scrapeAccountMovements(page, debugLog, doScreenshots, progress);

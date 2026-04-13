@@ -107,6 +107,10 @@ export interface ScrapeResult {
   screenshot?: string;
   /** Log de debug con pasos del scraper */
   debug?: string;
+  /** Si es true, solo se validaron credenciales (sin scraping completo) */
+  validateOnly?: boolean;
+  /** Si es true, el banco requiere 2FA para completar el flujo */
+  requires2FA?: boolean;
 }
 
 /** Credenciales de autenticación */
@@ -131,6 +135,8 @@ export interface ScraperOptions extends BankCredentials {
   onProgress?: (step: string) => void;
   /** Callback invocado en cada línea de debug en tiempo real */
   onDebug?: (line: string) => void;
+  /** Si es true, solo valida credenciales sin hacer scraping completo (~15s vs 1-3min) */
+  validateOnly?: boolean;
 }
 
 /** Interfaz que debe implementar cada banco */

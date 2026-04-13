@@ -4,6 +4,7 @@ import { MOVEMENT_SOURCE } from "../types.js";
 import { closePopups, delay, parseChileanAmount, normalizeDate, deduplicateMovements } from "../utils.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── BICE-specific constants ─────────────────────────────────────
 
@@ -605,6 +606,11 @@ async function scrapeBice(session: BrowserSession, options: ScraperOptions): Pro
   }
 
   progress("Sesión iniciada correctamente");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options);
+  if (validateResult) return validateResult;
+
   const activePage = loginResult.activePage || page;
   await dismissAdPopup(activePage, debugLog);
   await closePopups(activePage);

@@ -7,6 +7,7 @@ import type { BrowserSession } from "../infrastructure/browser.js";
 import { detect2FA, waitFor2FA } from "../actions/two-factor.js";
 import { detectLoginError } from "../actions/login.js";
 import { createInterceptor } from "../intercept.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── BCI-specific constants ──────────────────────────────────────
 
@@ -408,6 +409,11 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   }
 
   progress("Sesión iniciada correctamente");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options, TWO_FACTOR_CONFIG);
+  if (validateResult) return validateResult;
+
   await closePopups(page);
   await delay(2000);
 

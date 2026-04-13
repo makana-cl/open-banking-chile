@@ -9,6 +9,7 @@ import { extractAccountMovements } from "../actions/extraction.js";
 import { paginateAndExtract } from "../actions/pagination.js";
 import { extractBalance } from "../actions/balance.js";
 import { clickTcTab, extractCreditCardMovements } from "../actions/credit-card.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── Edwards-specific constants ──────────────────────────────────
 
@@ -155,6 +156,11 @@ async function scrapeEdwards(session: BrowserSession, options: ScraperOptions): 
 
   debugLog.push("5. Login OK!");
   progress("Sesión iniciada correctamente");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options);
+  if (validateResult) return validateResult;
+
   await closePopups(page);
 
   // 6. Navigate to movements
