@@ -158,14 +158,47 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     return { success: false, error: "El banco pide clave dinámica (2FA).", screenshot: ss };
   }
 
-  // Error check
-  const errorText = await page.locator('[class*="error"], [class*="alert"], [role="alert"]')
-    .first()
-    .textContent({ timeout: 2000 })
-    .catch(() => null);
-  if (errorText && errorText.trim().length > 5 && errorText.trim().length < 200) {
+  // Error check — look for error messages with broader selectors
+  const errorSelectors = [
+    '[class*="error"]',
+    '[class*="alert"]',
+    '[role="alert"]',
+    '[class*="mensaje"]',
+    '[class*="notification"]',
+    '[class*="toast"]',
+    '[class*="snackbar"]',
+  ];
+  for (const sel of errorSelectors) {
+    const errorText = await page.locator(sel)
+      .first()
+      .textContent({ timeout: 1000 })
+      .catch(() => null);
+    if (errorText && errorText.trim().length > 5 && errorText.trim().length < 200) {
+      const pattern = /(error|incorrect|inv[aá]lid|rechazad|bloquead|fall[oó]|intenta|credencial|clave|rut)/i;
+      if (pattern.test(errorText)) {
+        const ss = (await page.screenshot()).toString("base64");
+        return { success: false, error: `Error del banco: ${errorText.trim()}`, screenshot: ss };
+      }
+    }
+  }
+
+  // Also check page text for auth error keywords (catches inline text errors)
+  const pageText = await page.evaluate(() => document.body.innerText).catch(() => "");
+  const authErrorPattern = /clave.*(incorrecta|err[oó]nea|inv[aá]lid)|credencial.*(incorrecta|inv[aá]lid)|usuario.*no.*existe|rut.*(incorrecto|inv[aá]lid)|datos.*incorrectos|intenta.*nuevamente/i;
+  const authMatch = pageText.match(authErrorPattern);
+  if (authMatch) {
     const ss = (await page.screenshot()).toString("base64");
-    return { success: false, error: `Error del banco: ${errorText.trim()}`, screenshot: ss };
+    return { success: false, error: `Credenciales incorrectas`, screenshot: ss };
+  }
+
+  // Fallback: if password field is still visible, login failed silently
+  const pwdStillVisible = await page.locator('input[type="password"]')
+    .first()
+    .isVisible({ timeout: 1000 })
+    .catch(() => false);
+  if (pwdStillVisible) {
+    const ss = (await page.screenshot()).toString("base64");
+    return { success: false, error: "Credenciales incorrectas", screenshot: ss };
   }
 
   debugLog.push("6. Login OK!");
