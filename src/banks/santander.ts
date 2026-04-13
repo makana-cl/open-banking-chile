@@ -5,6 +5,7 @@ import { deduplicateMovements, closePopups, delay, normalizeDate, parseChileanAm
 import { createInterceptor } from "../intercept.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── API response normalizers ────────────────────────────────────
 
@@ -738,6 +739,11 @@ async function scrapeSantanderV2(
 
   debugLog.push("3. Login OK — dashboard loaded");
   progress("Sesión iniciada correctamente");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options);
+  if (validateResult) return validateResult;
+
   await closePopups(page);
   await delay(2000);
 

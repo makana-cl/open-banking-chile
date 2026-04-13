@@ -4,6 +4,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import type { BankMovement, BankScraper, CreditCardBalance, ScrapeResult, ScraperOptions, MovementSource } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
 import { DebugLog, delay, deduplicateMovements, findChrome, normalizeDate, normalizeInstallments, parseChileanAmount } from "../utils.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -854,6 +855,10 @@ async function scrapeConsorcioPw(options: ScraperOptions): Promise<ScrapeResult>
         debug: debugLog.join("\n"),
       };
     }
+
+    // Validate-only mode: return early after successful login
+    const validateResult = await handleValidateOnly(page, bank, options);
+    if (validateResult) return validateResult;
 
     // ── Phase 1: Account movements ────────────────────────────
     const { movements: accountMovements, balance, accountLabel } = await scrapeAccountMovements(page, debugLog, doScreenshots, progress);

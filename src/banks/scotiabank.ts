@@ -6,6 +6,7 @@ import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { fillRut, fillPassword, clickSubmit, detectLoginError } from "../actions/login.js";
 import { dismissBanners } from "../actions/navigation.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── Scotiabank-specific constants ───────────────────────────────
 
@@ -386,6 +387,11 @@ async function scrapeScotiabank(session: BrowserSession, options: ScraperOptions
 
   debugLog.push("6. Login OK!");
   progress("Sesión iniciada correctamente");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options);
+  if (validateResult) return validateResult;
+
   await closePopups(page);
   await dismissScotiaTutorial(page, debugLog);
 

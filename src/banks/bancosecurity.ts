@@ -6,6 +6,7 @@ import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { fillRut, fillPassword, detectLoginError } from "../actions/login.js";
 import { dismissBanners } from "../actions/navigation.js";
+import { handleValidateOnly } from "../actions/validate.js";
 
 // ─── Constants ────────────────────────────────────────────────────
 
@@ -426,6 +427,11 @@ async function scrapeBancoSecurity(session: BrowserSession, options: ScraperOpti
 
   debugLog.push("6. Login OK!");
   progress("Sesión iniciada");
+
+  // Validate-only mode: return early after successful login
+  const validateResult = await handleValidateOnly(page, bank, options);
+  if (validateResult) return validateResult;
+
   await closePopups(page);
 
   // 7. Navigate to cartola
