@@ -135,7 +135,7 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   // Smart wait: instead of a fixed delay, wait for the login form to resolve.
   // Race between password field disappearing (success) and error appearing (failure).
   debugLog.push("5a. Waiting for login result...");
-  const LOGIN_WAIT_MS = 20_000;
+  const LOGIN_WAIT_MS = 12_000;
   const loginOutcome = await waitForLoginOutcome(page, LOGIN_WAIT_MS);
   debugLog.push(`  Outcome: ${loginOutcome.type} (${loginOutcome.detail})`);
   debugLog.push(`  Current URL: ${page.url()}`);
