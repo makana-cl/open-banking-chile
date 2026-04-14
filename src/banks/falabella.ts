@@ -89,13 +89,14 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   await delay(3000);
   await screenshotIfEnabled(page, "02-login-form", doScreenshots, debugLog);
 
-  // Fill RUT
+  // Fill RUT — strip dots/dashes so the bank's own formatter handles it
   debugLog.push("3. Filling RUT...");
   progress("Ingresando RUT...");
+  const cleanRut = rut.replace(/[.\-]/g, "");
   const rutInput = page.getByRole("textbox", { name: "RUT", exact: true })
     .or(page.locator('input[name*="rut"], input[id*="rut"], input[placeholder*="RUT"]').first());
   try {
-    await rutInput.fill(rut, { timeout: 10000 });
+    await rutInput.fill(cleanRut, { timeout: 10000 });
   } catch {
     const ss = (await page.screenshot()).toString("base64");
     return { success: false, error: "No se encontró campo de RUT", screenshot: ss };
