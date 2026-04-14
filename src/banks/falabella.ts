@@ -132,33 +132,58 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     await page.keyboard.press("Enter");
   }
 
-  await page.waitForLoadState("networkidle").catch(() => {});
-  await delay(8000);
+  // Smart wait: instead of a fixed delay, wait for the login form to resolve.
+  // Race between password field disappearing (success) and error appearing (failure).
+  debugLog.push("5a. Waiting for login result...");
+  const LOGIN_WAIT_MS = 20_000;
+  const loginOutcome = await waitForLoginOutcome(page, LOGIN_WAIT_MS);
+  debugLog.push(`  Outcome: ${loginOutcome.type} (${loginOutcome.detail})`);
+  debugLog.push(`  Current URL: ${page.url()}`);
   await screenshotIfEnabled(page, "03-after-login", doScreenshots, debugLog);
+
+  if (loginOutcome.type === "error") {
+    const ss = (await page.screenshot()).toString("base64");
+    return { success: false, error: loginOutcome.detail, screenshot: ss };
+  }
+
+  if (loginOutcome.type === "timeout") {
+    // Timeout: page didn't resolve — run fallback checks
+    debugLog.push("5b. Timeout — running fallback checks...");
+  } else {
+    debugLog.push("5b. Login form disappeared — running post-login checks...");
+  }
 
   // Close post-login popups
   try {
     const closeBtn = page.getByRole("button", { name: "cerrar", exact: true });
-    if (await closeBtn.isVisible({ timeout: 2000 }).catch(() => false)) await closeBtn.click();
+    if (await closeBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      debugLog.push("  Closed popup");
+      await closeBtn.click();
+    }
   } catch { /* no popup */ }
 
   // Retry if products failed to load
   try {
     const retryBtn = page.getByText("Reintentar");
     if (await retryBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+      debugLog.push("  Clicked Reintentar");
       await retryBtn.click();
       await delay(5000);
     }
   } catch { /* products loaded fine */ }
 
   // 2FA check
+  debugLog.push("5c. Checking 2FA...");
   const content = await page.content();
   if (content.toLowerCase().includes("clave dinámica") || content.toLowerCase().includes("segundo factor")) {
+    debugLog.push("  FAILED: 2FA detected");
     const ss = (await page.screenshot()).toString("base64");
     return { success: false, error: "El banco pide clave dinámica (2FA).", screenshot: ss };
   }
+  debugLog.push("  No 2FA detected");
 
   // Error check — look for error messages with broader selectors
+  debugLog.push("5d. Checking error selectors...");
   const errorSelectors = [
     '[class*="error"]',
     '[class*="alert"]',
@@ -176,30 +201,38 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     if (errorText && errorText.trim().length > 5 && errorText.trim().length < 200) {
       const pattern = /(error|incorrect|inv[aá]lid|rechazad|bloquead|fall[oó]|intenta|credencial|clave|rut)/i;
       if (pattern.test(errorText)) {
+        debugLog.push(`  FAILED: selector "${sel}" matched text: "${errorText.trim()}"`);
         const ss = (await page.screenshot()).toString("base64");
         return { success: false, error: `Error del banco: ${errorText.trim()}`, screenshot: ss };
       }
     }
   }
+  debugLog.push("  No error selectors matched");
 
-  // Also check page text for auth error keywords (catches inline text errors)
+  // Auth error keywords in page text
+  debugLog.push("5e. Checking auth error keywords...");
   const pageText = await page.evaluate(() => document.body.innerText).catch(() => "");
   const authErrorPattern = /clave.*(incorrecta|err[oó]nea|inv[aá]lid)|credencial.*(incorrecta|inv[aá]lid)|usuario.*no.*existe|rut.*(incorrecto|inv[aá]lid)|datos.*incorrectos|intenta.*nuevamente/i;
   const authMatch = pageText.match(authErrorPattern);
   if (authMatch) {
+    debugLog.push(`  FAILED: auth pattern matched: "${authMatch[0]}"`);
     const ss = (await page.screenshot()).toString("base64");
-    return { success: false, error: `Credenciales incorrectas`, screenshot: ss };
+    return { success: false, error: "Credenciales incorrectas", screenshot: ss };
   }
+  debugLog.push("  No auth error keywords found");
 
-  // Fallback: if password field is still visible, login failed silently
+  // Fallback: if password field is still visible after all checks, login failed
+  debugLog.push("5f. Checking if password field still visible...");
   const pwdStillVisible = await page.locator('input[type="password"]')
     .first()
     .isVisible({ timeout: 1000 })
     .catch(() => false);
   if (pwdStillVisible) {
+    debugLog.push("  FAILED: password field still visible");
     const ss = (await page.screenshot()).toString("base64");
     return { success: false, error: "Credenciales incorrectas", screenshot: ss };
   }
+  debugLog.push("  Password field not visible (good)");
 
   // Session diagnostics: log page state for debugging (visible in Cloud Run logs
   // via onProgress). This does NOT block login — it only logs what the scraper sees
@@ -219,6 +252,53 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   debugLog.push("7. Login OK!");
   progress("Sesión iniciada correctamente");
   return { success: true };
+}
+
+// ─── Smart login wait ───────────────────────────────────────────
+
+interface LoginOutcome {
+  type: "success" | "error" | "timeout";
+  detail: string;
+}
+
+/**
+ * Wait for the login to resolve instead of using a fixed delay.
+ * Races between: password field disappearing (success), error appearing (failure),
+ * or a timeout. Much more reliable across different network conditions.
+ */
+async function waitForLoginOutcome(page: Page, timeoutMs: number): Promise<LoginOutcome> {
+  const start = Date.now();
+  const pollInterval = 1000;
+
+  while (Date.now() - start < timeoutMs) {
+    // Check 1: password field disappeared → login form is gone
+    const pwdVisible = await page.locator('input[type="password"]')
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
+
+    if (!pwdVisible) {
+      // Give the page a moment to settle after navigation
+      await delay(2000);
+      return { type: "success", detail: "login form disappeared" };
+    }
+
+    // Check 2: error message appeared while login form is still showing
+    const errorText = await page.locator('[class*="error"], [role="alert"], [class*="alert"]')
+      .first()
+      .textContent({ timeout: 300 })
+      .catch(() => null);
+    if (errorText && errorText.trim().length > 5) {
+      const pattern = /(error|incorrect|inv[aá]lid|rechazad|bloquead|fall[oó]|intenta|credencial|clave|rut)/i;
+      if (pattern.test(errorText)) {
+        return { type: "error", detail: `Error del banco: ${errorText.trim()}` };
+      }
+    }
+
+    await delay(pollInterval);
+  }
+
+  return { type: "timeout", detail: `login form still visible after ${timeoutMs}ms` };
 }
 
 // ─── Session diagnostics ────────────────────────────────────────
@@ -1011,7 +1091,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     if (validateResult) {
       progress("Cerrando sesión...");
       await performLogout(page, debugLog);
-      return validateResult;
+      return { ...validateResult, debug: debugLog.join("\n") };
     }
 
     // Phase 1: Account movements
