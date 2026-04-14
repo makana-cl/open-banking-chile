@@ -369,9 +369,69 @@ async function performLogout(page: Page, debugLog: string[]): Promise<void> {
 
 // ─── Account movements ──────────────────────────────────────────
 
+// ─── Marketing popup dismissal ──────────────────────────────────
+
+/**
+ * Dismiss marketing popups/overlays that block interaction with the dashboard.
+ * Falabella shows promotional popups after login (e.g. "¡Duplicamos tu sueldo!")
+ * with a backdrop that intercepts pointer events.
+ */
+async function dismissMarketingPopups(page: Page, debugLog: string[]): Promise<void> {
+  try {
+    // Try closing via close/X buttons on the popup
+    const closeSelectors = [
+      'app-marketing button[class*="close"]',
+      'app-marketing [class*="close"]',
+      'app-marketing .close',
+      '[class*="modal"] button[class*="close"]',
+      '[class*="modal"] .close',
+      'button[aria-label="Close"]',
+      'button[aria-label="close"]',
+      'button[aria-label="Cerrar"]',
+    ];
+    for (const sel of closeSelectors) {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 500 }).catch(() => false)) {
+        await btn.click({ force: true });
+        debugLog.push(`  Dismissed marketing popup via ${sel}`);
+        await delay(1000);
+        return;
+      }
+    }
+
+    // Fallback: click the backdrop itself to dismiss
+    const backdrop = page.locator('#background-shadow.backdrop.visible, [class*="backdrop"].visible').first();
+    if (await backdrop.isVisible({ timeout: 500 }).catch(() => false)) {
+      await backdrop.click({ force: true, position: { x: 10, y: 10 } });
+      debugLog.push("  Dismissed marketing popup via backdrop click");
+      await delay(1000);
+      return;
+    }
+
+    // Last resort: remove the overlay via JS
+    const removed = await page.evaluate(() => {
+      const backdrop = document.querySelector('#background-shadow.backdrop.visible') as HTMLElement;
+      const marketing = document.querySelector('app-marketing') as HTMLElement;
+      if (backdrop || marketing) {
+        backdrop?.remove();
+        marketing?.remove();
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+    if (removed) {
+      debugLog.push("  Dismissed marketing popup via DOM removal");
+      await delay(500);
+    }
+  } catch { /* no popup to dismiss */ }
+}
+
 async function scrapeAccountMovements(page: Page, debugLog: string[], doScreenshots: boolean, progress: (s: string) => void): Promise<{ movements: BankMovement[]; balance?: number }> {
   debugLog.push("7. [Cuenta] Looking for account...");
   progress("Buscando cartola de cuenta...");
+
+  // Dismiss marketing popups/overlays that block clicks
+  await dismissMarketingPopups(page, debugLog);
 
   // Try clicking on Cuenta Corriente product card
   const ccLink = page.getByRole("link", { name: /Cuenta Corriente \d/ });
