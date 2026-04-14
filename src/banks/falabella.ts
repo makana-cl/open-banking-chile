@@ -201,15 +201,19 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     return { success: false, error: "Credenciales incorrectas", screenshot: ss };
   }
 
-  // Positive validation: verify we're actually logged in by checking for
-  // session indicators. Without this, a bank redirect to any non-login page
-  // (e.g. error page, maintenance, captcha) would be treated as success.
-  debugLog.push("6. Verifying session (positive validation)...");
-  const loggedIn = await verifyLoggedIn(page);
-  if (!loggedIn) {
-    const ss = (await page.screenshot()).toString("base64");
-    debugLog.push("  Positive validation FAILED — no session indicators found");
-    return { success: false, error: "Credenciales incorrectas", screenshot: ss };
+  // Session diagnostics: log page state for debugging (visible in Cloud Run logs
+  // via onProgress). This does NOT block login — it only logs what the scraper sees
+  // so we can diagnose issues without redeploying.
+  debugLog.push("6. Session diagnostics...");
+  const sessionInfo = await getSessionDiagnostics(page);
+  debugLog.push(`  URL: ${sessionInfo.url}`);
+  debugLog.push(`  Title: ${sessionInfo.title}`);
+  debugLog.push(`  Logout button: ${sessionInfo.hasLogout}`);
+  debugLog.push(`  Product indicators: ${sessionInfo.productMatches.join(", ") || "none"}`);
+  if (sessionInfo.hasLogout || sessionInfo.productMatches.length > 0) {
+    debugLog.push("  Session confirmed via positive indicators");
+  } else {
+    debugLog.push("  No positive indicators found (negative checks passed, proceeding)");
   }
 
   debugLog.push("7. Login OK!");
@@ -217,49 +221,46 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   return { success: true };
 }
 
-// ─── Positive login validation ──────────────────────────────────
+// ─── Session diagnostics ────────────────────────────────────────
+
+interface SessionDiagnostics {
+  url: string;
+  title: string;
+  hasLogout: boolean;
+  productMatches: string[];
+}
 
 /**
- * Verify the user is actually logged in by checking for positive indicators.
- * This prevents false positives when the bank redirects to a non-login page
- * (error page, maintenance, captcha) that doesn't show our expected error selectors.
+ * Collect diagnostic info about the current page state after login.
+ * Used for debugging — does NOT affect login success/failure.
  */
-async function verifyLoggedIn(page: Page): Promise<boolean> {
-  // Check 1: Logout button visible (strongest indicator)
-  const logoutVisible = await page.evaluate(() => {
-    const els = document.querySelectorAll("a, button, span, li");
-    for (const el of Array.from(els)) {
+async function getSessionDiagnostics(page: Page): Promise<SessionDiagnostics> {
+  const url = page.url();
+  const title = await page.title().catch(() => "(unknown)");
+
+  const hasLogout = await page.evaluate(() => {
+    for (const el of Array.from(document.querySelectorAll("a, button, span, li"))) {
       const text = (el as HTMLElement).innerText?.trim().toLowerCase() ?? "";
-      if (text === "cerrar sesión" || text === "cerrar sesion" || text === "salir") {
-        return true;
-      }
+      if (text === "cerrar sesión" || text === "cerrar sesion" || text === "salir") return true;
     }
     return false;
   }).catch(() => false);
-  if (logoutVisible) return true;
 
-  // Check 2: Product/account elements visible (dashboard content)
-  const productIndicators = [
-    /cuenta corriente/i,
-    /cuenta vista/i,
-    /tarjeta de cr[eé]dito/i,
-    /CMR/,
-    /saldo disponible/i,
-    /mis productos/i,
-    /resumen/i,
+  const productIndicators: Array<[RegExp, string]> = [
+    [/cuenta corriente/i, "cuenta_corriente"],
+    [/cuenta vista/i, "cuenta_vista"],
+    [/tarjeta de cr[eé]dito/i, "tarjeta_credito"],
+    [/CMR/, "CMR"],
+    [/saldo disponible/i, "saldo"],
+    [/mis productos/i, "mis_productos"],
+    [/cerrar sesi[oó]n/i, "logout_text"],
   ];
   const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
-  for (const pattern of productIndicators) {
-    if (pattern.test(bodyText)) return true;
-  }
+  const productMatches = productIndicators
+    .filter(([pattern]) => pattern.test(bodyText))
+    .map(([, label]) => label);
 
-  // Check 3: URL changed to a post-login path
-  const url = page.url().toLowerCase();
-  if (url.includes("/personas/") || url.includes("/dashboard") || url.includes("/home") || url.includes("/productos")) {
-    return true;
-  }
-
-  return false;
+  return { url, title, hasLogout, productMatches };
 }
 
 // ─── Logout helper ──────────────────────────────────────────────
