@@ -201,9 +201,88 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     return { success: false, error: "Credenciales incorrectas", screenshot: ss };
   }
 
-  debugLog.push("6. Login OK!");
+  // Positive validation: verify we're actually logged in by checking for
+  // session indicators. Without this, a bank redirect to any non-login page
+  // (e.g. error page, maintenance, captcha) would be treated as success.
+  debugLog.push("6. Verifying session (positive validation)...");
+  const loggedIn = await verifyLoggedIn(page);
+  if (!loggedIn) {
+    const ss = (await page.screenshot()).toString("base64");
+    debugLog.push("  Positive validation FAILED — no session indicators found");
+    return { success: false, error: "Credenciales incorrectas", screenshot: ss };
+  }
+
+  debugLog.push("7. Login OK!");
   progress("Sesión iniciada correctamente");
   return { success: true };
+}
+
+// ─── Positive login validation ──────────────────────────────────
+
+/**
+ * Verify the user is actually logged in by checking for positive indicators.
+ * This prevents false positives when the bank redirects to a non-login page
+ * (error page, maintenance, captcha) that doesn't show our expected error selectors.
+ */
+async function verifyLoggedIn(page: Page): Promise<boolean> {
+  // Check 1: Logout button visible (strongest indicator)
+  const logoutVisible = await page.evaluate(() => {
+    const els = document.querySelectorAll("a, button, span, li");
+    for (const el of Array.from(els)) {
+      const text = (el as HTMLElement).innerText?.trim().toLowerCase() ?? "";
+      if (text === "cerrar sesión" || text === "cerrar sesion" || text === "salir") {
+        return true;
+      }
+    }
+    return false;
+  }).catch(() => false);
+  if (logoutVisible) return true;
+
+  // Check 2: Product/account elements visible (dashboard content)
+  const productIndicators = [
+    /cuenta corriente/i,
+    /cuenta vista/i,
+    /tarjeta de cr[eé]dito/i,
+    /CMR/,
+    /saldo disponible/i,
+    /mis productos/i,
+    /resumen/i,
+  ];
+  const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+  for (const pattern of productIndicators) {
+    if (pattern.test(bodyText)) return true;
+  }
+
+  // Check 3: URL changed to a post-login path
+  const url = page.url().toLowerCase();
+  if (url.includes("/personas/") || url.includes("/dashboard") || url.includes("/home") || url.includes("/productos")) {
+    return true;
+  }
+
+  return false;
+}
+
+// ─── Logout helper ──────────────────────────────────────────────
+
+/**
+ * Attempt to log out of the bank session. Best-effort — failures are swallowed
+ * since the browser will be closed anyway.
+ */
+async function performLogout(page: Page, debugLog: string[]): Promise<void> {
+  try {
+    debugLog.push("  Performing logout...");
+    await page.evaluate(() => {
+      for (const el of Array.from(document.querySelectorAll("a, button, span"))) {
+        const text = (el as HTMLElement).innerText?.trim().toLowerCase();
+        if (text === "cerrar sesión" || text === "cerrar sesion" || text === "salir") {
+          (el as HTMLElement).click();
+          return;
+        }
+      }
+    });
+    await delay(2000);
+    debugLog.push("  Logout completed");
+  } catch { /* best effort */ }
 }
 
 // ─── Account movements ──────────────────────────────────────────
@@ -926,9 +1005,13 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     const dashboardUrl = page.url();
     await screenshotIfEnabled(page, "04-post-login", doScreenshots, debugLog);
 
-    // Validate-only mode: return early after successful login
+    // Validate-only mode: login succeeded → logout → return
     const validateResult = await handleValidateOnly(page, bank, options);
-    if (validateResult) return validateResult;
+    if (validateResult) {
+      progress("Cerrando sesión...");
+      await performLogout(page, debugLog);
+      return validateResult;
+    }
 
     // Phase 1: Account movements
     const { movements: accountMovements, balance } = await scrapeAccountMovements(page, debugLog, doScreenshots, progress);
@@ -955,18 +1038,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     const ss = doScreenshots ? (await page.screenshot({ fullPage: true })).toString("base64") : undefined;
 
     // Logout
-    try {
-      await page.evaluate(() => {
-        for (const el of Array.from(document.querySelectorAll("a, button, span"))) {
-          const text = (el as HTMLElement).innerText?.trim().toLowerCase();
-          if (text === "cerrar sesión" || text === "cerrar sesion" || text === "salir") {
-            (el as HTMLElement).click();
-            return;
-          }
-        }
-      });
-      await delay(2000);
-    } catch { /* best effort */ }
+    await performLogout(page, debugLog);
 
     return {
       success: true,
