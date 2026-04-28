@@ -59,7 +59,7 @@ async function screenshotIfEnabled(page: Page, name: string, enabled: boolean, d
   const safeName = name.replace(/[/\\:*?"<>|]/g, "_");
   const dir = path.resolve("screenshots");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  await page.screenshot({ path: path.join(dir, `${safeName}.png`), fullPage: true });
+  await page.screenshot({ path: path.join(dir, `${safeName}.png`), fullPage: false });
   debugLog.push(`  Screenshot: ${safeName}.png`);
   return undefined;
 }
@@ -69,7 +69,9 @@ async function screenshotIfEnabled(page: Page, name: string, enabled: boolean, d
 async function login(page: Page, rut: string, password: string, debugLog: string[], doScreenshots: boolean, progress: (s: string) => void): Promise<{ success: true } | { success: false; error: string; screenshot?: string }> {
   debugLog.push("1. Navigating to bank homepage...");
   progress("Abriendo sitio del banco...");
-  await page.goto(BANK_URL, { waitUntil: "networkidle" });
+  // Use domcontentloaded (not networkidle): Falabella has persistent analytics
+  // connections that never let networkidle fire, causing spurious 30s timeouts.
+  await page.goto(BANK_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
   await delay(2000);
 
   // Dismiss banners/popups
@@ -79,80 +81,133 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   } catch { /* no banner */ }
   await screenshotIfEnabled(page, "01-homepage", doScreenshots, debugLog);
 
-  // Click "Mi cuenta" (triggers navigation)
-  debugLog.push("2. Clicking 'Mi cuenta'...");
-  progress("Ingresando a Mi cuenta...");
+  // Click "Mi cuenta" — opens an inline login dropdown in the header. JS-driven
+  // (no href). At desktop viewport (>= 992px) the visible button is in
+  // .header_wrapper-actions--show; at narrower viewports a different "Mi cuenta"
+  // exists with id #btn-auth-normal. Our viewport is 1280x900 so prefer desktop.
+  // Wait for React/Next.js to hydrate first; otherwise the click fires before
+  // the handler is bound and silently no-ops.
+  debugLog.push("2. Clicking 'Mi cuenta' (desktop header)...");
+  progress("Abriendo modal de login...");
+  await delay(2000); // hydration
+  const miCuentaBtn = page.locator(
+    '.header_wrapper-actions--show__2Qqrh button.button_button__primary__OoF9e'
+  ).or(page.locator('button#btn-auth-normal'));
   try {
-    await page.locator('a, button').filter({ hasText: "Mi cuenta" }).first().click({ timeout: 5000 });
-  } catch { /* may cause navigation context change */ }
-  await page.waitForLoadState("networkidle").catch(() => {});
-  await delay(3000);
+    await miCuentaBtn.first().waitFor({ state: 'visible', timeout: 10000 });
+    await miCuentaBtn.first().click({ timeout: 5000 });
+    debugLog.push("  Clicked 'Mi cuenta'");
+  } catch (err) {
+    debugLog.push(`  Failed to click 'Mi cuenta': ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Wait for the RUT input to appear — positive proof the dropdown opened.
+  // The page also has a marketing input with placeholder="Ingresa tu RUT"
+  // (account-opening form), so we target the EXACT placeholder "RUT" used by
+  // the login input only.
+  debugLog.push("2a. Waiting for RUT input to appear...");
+  const rutInput = page.locator('input[placeholder="RUT"]').first();
+  const rutVisible = await rutInput.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
+  if (!rutVisible) {
+    debugLog.push("  RUT input did not appear within 10s");
+  }
   await screenshotIfEnabled(page, "02-login-form", doScreenshots, debugLog);
 
-  // Fill RUT — strip dots/dashes so the bank's own formatter handles it
-  debugLog.push("3. Filling RUT...");
+  // Set up an early listener for the BFF auth response. Falabella's login goes
+  // through https://bff.bancofalabella.cl/login/v2/authentication-web — its
+  // status code is the authoritative success/failure signal (UI state changes
+  // are slower and unreliable).
+  const authResponsePromise = page.waitForResponse(
+    (res) => /bff\.bancofalabella\.cl\/login\/v2\/authentication-web/i.test(res.url()),
+    { timeout: 30000 }
+  ).catch(() => null);
+
+  // Fill RUT — strip dots/dashes; bank auto-formats. Type sequentially so the
+  // React/JS validators fire on each keystroke (programmatic .fill() is
+  // accepted on RUT but the form won't enable submit without real key events).
+  debugLog.push("3. Filling RUT (keyboard sequential)...");
   progress("Ingresando RUT...");
   const cleanRut = rut.replace(/[.\-]/g, "");
-  const rutInput = page.getByRole("textbox", { name: "RUT", exact: true })
-    .or(page.locator('input[name*="rut"], input[id*="rut"], input[placeholder*="RUT"]').first());
   try {
-    await rutInput.fill(cleanRut, { timeout: 10000 });
+    await rutInput.click({ timeout: 10000 });
+    await rutInput.pressSequentially(cleanRut, { delay: 50 });
   } catch {
     const ss = (await page.screenshot()).toString("base64");
     return { success: false, error: "No se encontró campo de RUT", screenshot: ss };
   }
-  await delay(1000);
+  await delay(500);
 
-  // Advance to password step (Falabella uses two-step modal)
-  await page.keyboard.press("Enter");
-  debugLog.push("  Pressed Enter to advance to password step");
-  await delay(2000);
-
-  // Fill password
-  debugLog.push("4. Filling password...");
+  // Fill password — Falabella's "Clave Internet" is a 6-digit numeric PIN
+  // (maxLength=6, letters silently filtered). Programmatic value setting is
+  // rejected — must type sequentially for keyboard events. Do NOT press Enter
+  // between RUT and password: it's a single-step form, and an Enter mid-fill
+  // submits with empty password and the form silently rejects.
+  debugLog.push("4. Filling password (keyboard sequential)...");
   progress("Ingresando clave...");
-  const pwdInput = page.locator('input[type="password"]').first()
-    .or(page.getByRole("textbox", { name: /[Cc]lave/ }).first());
+  const pwdInput = page.locator('input[type="password"][placeholder*="Clave" i]').first()
+    .or(page.locator('input[type="password"]').first());
   try {
-    await pwdInput.fill(password, { timeout: 10000 });
+    await pwdInput.click({ timeout: 10000 });
+    await pwdInput.pressSequentially(password, { delay: 50 });
   } catch {
     const ss = (await page.screenshot()).toString("base64");
     return { success: false, error: "No se encontró campo de clave", screenshot: ss };
   }
-  await delay(500);
 
-  // Submit login
+  // Submit. The "Ingresar" button stays disabled until the form is valid;
+  // pressing Enter on the PIN field submits regardless. Try the button first
+  // (more correct), fall back to Enter.
   debugLog.push("5. Submitting login...");
   progress("Iniciando sesión...");
-  // Try clicking submit button, fallback to Enter
-  const submitBtn = page.locator('button[type="submit"], input[type="submit"]').first()
-    .or(page.getByRole("button", { name: /ingresar|entrar|btn-md/i }).first());
+  const ingresarBtn = page.locator('button', { hasText: /^Ingresar$/i });
   try {
-    await submitBtn.click({ timeout: 3000 });
+    await ingresarBtn.first().waitFor({ state: 'visible', timeout: 3000 });
+    // Wait up to 5s for it to enable
+    await page.waitForFunction(
+      () => {
+        const b = Array.from(document.querySelectorAll('button')).find(
+          (x) => x.textContent?.trim() === 'Ingresar'
+        ) as HTMLButtonElement | undefined;
+        return !!b && !b.disabled;
+      },
+      { timeout: 5000 }
+    );
+    await ingresarBtn.first().click({ timeout: 3000 });
+    debugLog.push("  Clicked Ingresar");
   } catch {
-    await page.keyboard.press("Enter");
+    debugLog.push("  Ingresar not clickable, falling back to Enter on PIN field");
+    await pwdInput.press('Enter');
   }
 
-  // Smart wait: instead of a fixed delay, wait for the login form to resolve.
-  // Race between password field disappearing (success) and error appearing (failure).
-  debugLog.push("5a. Waiting for login result...");
-  const LOGIN_WAIT_MS = 12_000;
-  const loginOutcome = await waitForLoginOutcome(page, LOGIN_WAIT_MS);
-  debugLog.push(`  Outcome: ${loginOutcome.type} (${loginOutcome.detail})`);
-  debugLog.push(`  Current URL: ${page.url()}`);
-  await screenshotIfEnabled(page, "03-after-login", doScreenshots, debugLog);
-
-  if (loginOutcome.type === "error") {
-    const ss = (await page.screenshot()).toString("base64");
-    return { success: false, error: loginOutcome.detail, screenshot: ss };
-  }
-
-  if (loginOutcome.type === "timeout") {
-    // Timeout: page didn't resolve — run fallback checks
-    debugLog.push("5b. Timeout — running fallback checks...");
+  // Wait for the authoritative signal: the BFF auth response status.
+  debugLog.push("5a. Waiting for BFF auth response...");
+  const authResponse = await authResponsePromise;
+  if (authResponse) {
+    const status = authResponse.status();
+    debugLog.push(`  BFF auth response: HTTP ${status}`);
+    if (status === 401 || status === 403) {
+      const ss = (await page.screenshot()).toString("base64");
+      return { success: false, error: "Credenciales incorrectas", screenshot: ss };
+    }
+    if (status === 423 || status === 429) {
+      const ss = (await page.screenshot()).toString("base64");
+      return { success: false, error: "Cuenta bloqueada o demasiados intentos", screenshot: ss };
+    }
+    if (status >= 500) {
+      const ss = (await page.screenshot()).toString("base64");
+      return { success: false, error: `Error del banco (HTTP ${status})`, screenshot: ss };
+    }
+    if (status !== 200) {
+      const ss = (await page.screenshot()).toString("base64");
+      return { success: false, error: `Respuesta inesperada del banco (HTTP ${status})`, screenshot: ss };
+    }
+    // 200 → login accepted. Proceed to post-login checks.
   } else {
-    debugLog.push("5b. Login form disappeared — running post-login checks...");
+    debugLog.push("  BFF auth response not observed — falling back to UI checks");
   }
+  await screenshotIfEnabled(page, "03-after-login", doScreenshots, debugLog);
+  debugLog.push(`  Current URL: ${page.url()}`);
+  debugLog.push("5b. Running post-login checks...");
 
   // Close post-login popups
   try {
